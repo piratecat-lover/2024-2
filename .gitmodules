@@ -1,0 +1,3 @@
+[submodule "EPOCH/daily-sql"]
+    path = EPOCH/daily-sql
+    url = https://github.com/Hyubbbb/Daily_SQL.git
