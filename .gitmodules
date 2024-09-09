@@ -1,3 +1,12 @@
 [submodule "EPOCH/daily-sql"]
     path = EPOCH/daily-sql
     url = https://github.com/Hyubbbb/Daily_SQL.git
+[submodule "rirolab/FAST_LIO_SLAM"]
+	path = rirolab/FAST_LIO_SLAM
+	url = https://github.com/piratecat-lover/FAST_LIO_SLAM.git
+[submodule "rirolab/gtsam_fusion"]
+	path = rirolab/gtsam_fusion
+	url = https://github.com/piratecat-lover/gtsam_fusion.git
+[submodule "rirolab/FAST_LIO_SAM"]
+	path = rirolab/FAST_LIO_SAM
+	url = https://github.com/piratecat-lover/FAST_LIO_SAM
