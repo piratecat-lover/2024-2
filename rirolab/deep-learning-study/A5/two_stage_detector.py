@@ -28,7 +28,12 @@ class ProposalModule(nn.Module):
     # Make sure that your region proposal module is called pred_layer
     self.pred_layer = None      
     # Replace "pass" statement with your code
-    pass
+    self.pred_layer = nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=3, padding=1),  # 3x3 Conv layer with padding
+            nn.Dropout(p=drop_ratio),                                 # Dropout layer
+            nn.LeakyReLU(negative_slope=0.1),                         # Leaky ReLU activation
+            nn.Conv2d(hidden_dim, num_anchors * 6, kernel_size=1)     # 1x1 Conv layer, output shape Bx(Ax6)x7x7
+        )
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -105,7 +110,32 @@ class ProposalModule(nn.Module):
     # function from the previous notebook.                                     #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    # Pass the input features through the proposal layer
+    pred_output = self.pred_layer(features)
+    
+    # Reshape output into classification scores and offsets
+    B, _, H, W = pred_output.shape
+    pred_output = pred_output.view(B, self.num_anchors, 6, H, W)
+    
+    # Extract conf_scores and offsets from the predictions
+    conf_scores = pred_output[:, :, :2, :, :]  # shape: B x A x 2 x H x W (class scores)
+    offsets = pred_output[:, :, 2:, :, :]  # shape: B x A x 4 x H x W (offsets)
+
+    if mode == 'train':
+        # For training, extract data only for positive and negative anchors
+        pos_conf_scores = self._extract_anchor_data(conf_scores, pos_anchor_idx)
+        neg_conf_scores = self._extract_anchor_data(conf_scores, neg_anchor_idx)
+        conf_scores = torch.cat([pos_conf_scores, neg_conf_scores], dim=0)
+
+        offsets = self._extract_anchor_data(offsets, pos_anchor_idx)
+
+        # Generate region proposals for positive anchors
+        proposals = GenerateProposal(pos_anchor_coord, offsets)
+
+    elif mode == 'eval':
+        # During evaluation, return predictions for all anchors
+        conf_scores = torch.sigmoid(conf_scores)  # Apply sigmoid to conf_scores
+        offsets = offsets  # No need to apply sigmoid here as these are offsets
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -218,7 +248,30 @@ class RPN(nn.Module):
     #       as positive/negative anchors have been explicitly targeted.          #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    # i) Extract features using the feature extractor
+    features = self.feat_extractor(images)
+
+    # ii) Generate anchor grids
+    B, _, H, W = features.shape
+    anc_per_img = self.anchor_list.shape[0] * H * W
+    all_anchors = GenerateAnchor(self.anchor_list, grid_size=(H, W))
+
+    # iii) Compute IoU between anchors and GT boxes, and determine activated anchors
+    iou_mat = IoU(all_anchors.unsqueeze(0).expand(B, *all_anchors.shape), bboxes)
+    pos_anchor_idx, neg_anchor_idx, GT_conf_scores, GT_offsets, GT_class = ReferenceOnActivatedAnchors(
+        all_anchors, bboxes, iou_mat, neg_thresh=0.2)
+
+    # iv) Compute predictions for classification scores and bounding box offsets
+    conf_scores, offsets, proposals = self.prop_module(
+        features, pos_anchor_coord=all_anchors[pos_anchor_idx], pos_anchor_idx=pos_anchor_idx, neg_anchor_idx=neg_anchor_idx
+    )
+
+    # v) Compute RPN loss (conf_loss, reg_loss)
+    conf_loss = ConfScoreRegression(conf_scores, GT_conf_scores)
+    reg_loss = BboxRegression(offsets, GT_offsets)
+
+    # Total loss
+    total_loss = w_conf * conf_loss + w_reg * reg_loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -272,7 +325,29 @@ class RPN(nn.Module):
     # HINT: Use `torch.no_grad` as context to speed up the computation.          #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    with torch.no_grad():
+            features = self.feat_extractor(images)
+            B, _, H, W = features.shape
+            all_anchors = GenerateAnchor(self.anchor_list, grid_size=(H, W))
+            conf_scores, offsets = self.prop_module(features)
+            conf_scores = torch.sigmoid(conf_scores)  # Convert to probabilities
+
+            final_proposals = []
+            final_conf_probs = []
+
+            for b in range(B):
+                proposals = GenerateProposal(all_anchors, offsets[b])
+                object_probs = conf_scores[b].view(-1)
+
+                # Apply thresholding
+                keep = object_probs > thresh
+                proposals = proposals[keep]
+                object_probs = object_probs[keep]
+
+                # Apply NMS
+                keep_nms = torchvision.ops.nms(proposals, object_probs, nms_thresh)
+                final_proposals.append(proposals[keep_nms])
+                final_conf_probs.append(object_probs[keep_nms])
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -302,7 +377,16 @@ class TwoStageDetector(nn.Module):
     self.cls_layer = None
 
     # Replace "pass" statement with your code
-    pass
+    # RPN Module
+    self.rpn = RPN()
+
+    # Region classification layer (Fast R-CNN)
+    self.cls_layer = nn.Sequential(
+        nn.Linear(in_dim, hidden_dim),
+        nn.Dropout(p=drop_ratio),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, num_classes)
+    )
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -336,7 +420,22 @@ class TwoStageDetector(nn.Module):
     #    total_loss = rpn_loss + cls_loss.                                       #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    # i) Use RPN to get proposals
+    rpn_loss, conf_scores, proposals, features, GT_class, pos_anchor_idx, anc_per_img = self.rpn(
+        images, bboxes, output_mode='all')
+
+    # ii) RoI Align and meanpool
+    roi_aligned_features = torchvision.ops.roi_align(features, [proposals], (self.roi_output_w, self.roi_output_h))
+    pooled_features = torch.mean(roi_aligned_features, dim=(2, 3))  # Meanpool over spatial dimensions (2, 3)
+
+    # iii) Pass RoI features through region classification layer
+    class_probs = self.cls_layer(pooled_features)
+
+    # iv) Compute the classification loss (cross entropy loss)
+    cls_loss = nn.functional.cross_entropy(class_probs, GT_class)
+
+    # v) Combine the RPN loss and classification loss
+    total_loss = rpn_loss + cls_loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -377,7 +476,24 @@ class TwoStageDetector(nn.Module):
     # probabilities from the second-stage network to compute final_class.       #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    with torch.no_grad():
+      # i) Use RPN for proposals and confidences
+      proposals, conf_probs, features = self.rpn.inference(images, thresh=thresh, nms_thresh=nms_thresh, mode='FasterRCNN')
+
+      for b in range(len(proposals)):
+        # ii) RoI Align on proposals
+        roi_aligned_features = torchvision.ops.roi_align(features[b].unsqueeze(0), [proposals[b]], (self.roi_output_w, self.roi_output_h))
+        pooled_features = torch.mean(roi_aligned_features, dim=(2, 3))  # Meanpool
+
+        # iii) Pass through classification layer to get class probabilities
+        class_probs = self.cls_layer(pooled_features)
+
+        # iv) Get the predicted class with highest probability
+        class_preds = torch.argmax(class_probs, dim=1)
+
+        final_proposals.append(proposals[b])
+        final_conf_probs.append(conf_probs[b].unsqueeze(1))  # Reshape
+        final_class.append(class_preds)
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################

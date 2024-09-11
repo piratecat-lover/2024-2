@@ -137,7 +137,41 @@ def IoU(proposals, bboxes):
   # bottom-right corner of proposal and bbox. Think about their relationships. #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  B, A, H, W, _ = proposals.shape  # (B, A, H', W', 4)
+  N = bboxes.shape[1]  # Number of ground-truth boxes
+
+  # Reshape proposals to (B, A*H*W, 4) for easier processing
+  proposals = proposals.view(B, A * H * W, 4)
+
+  # Extract the top-left and bottom-right coordinates of proposals and bboxes
+  proposal_x1, proposal_y1 = proposals[..., 0], proposals[..., 1]  # top-left (x, y)
+  proposal_x2, proposal_y2 = proposals[..., 2], proposals[..., 3]  # bottom-right (x, y)
+  bbox_x1, bbox_y1 = bboxes[..., 0], bboxes[..., 1]  # top-left (x, y)
+  bbox_x2, bbox_y2 = bboxes[..., 2], bboxes[..., 3]  # bottom-right (x, y)
+
+  # Calculate the coordinates of the intersection rectangle
+  inter_x1 = torch.max(proposal_x1.unsqueeze(-1), bbox_x1.unsqueeze(1))  # (B, A*H*W, N)
+  inter_y1 = torch.max(proposal_y1.unsqueeze(-1), bbox_y1.unsqueeze(1))  # (B, A*H*W, N)
+  inter_x2 = torch.min(proposal_x2.unsqueeze(-1), bbox_x2.unsqueeze(1))  # (B, A*H*W, N)
+  inter_y2 = torch.min(proposal_y2.unsqueeze(-1), bbox_y2.unsqueeze(1))  # (B, A*H*W, N)
+
+  # Compute intersection width and height
+  inter_w = (inter_x2 - inter_x1).clamp(min=0)  # Clamp to avoid negative values
+  inter_h = (inter_y2 - inter_y1).clamp(min=0)  # Clamp to avoid negative values
+
+  # Compute the area of the intersection
+  inter_area = inter_w * inter_h  # (B, A*H*W, N)
+
+  # Compute the area of the proposals and ground-truth boxes
+  proposal_area = (proposal_x2 - proposal_x1) * (proposal_y2 - proposal_y1)  # (B, A*H*W)
+  bbox_area = (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1)  # (B, N)
+
+  # Compute the area of the union
+  union_area = proposal_area.unsqueeze(-1) + bbox_area.unsqueeze(1) - inter_area  # (B, A*H*W, N)
+
+  # Compute IoU as the ratio of intersection area to union area
+  iou_mat = inter_area / union_area  # (B, A*H*W, N)
+
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -164,7 +198,12 @@ class PredictionNetwork(nn.Module):
     # Make sure to name your prediction network pred_layer.
     self.pred_layer = None
     # Replace "pass" statement with your code
-    pass
+    self.pred_layer = nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=1),  # 1x1 convolution
+            nn.Dropout(p=drop_ratio),                      # Dropout layer
+            nn.LeakyReLU(negative_slope=0.1),              # Leaky ReLU activation
+            nn.Conv2d(hidden_dim, num_anchors * (5 + num_classes), kernel_size=1)  # Final 1x1 conv layer
+        )
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -261,7 +300,42 @@ class PredictionNetwork(nn.Module):
     # negative anchors specified by pos_anchor_idx and neg_anchor_idx.         #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    predictions = self.pred_layer(features)
+    B, A_5C, H, W = predictions.shape
+    A = self.num_anchors
+    C = self.num_classes
+    
+    # Split the predictions into confidence scores, offsets, and class scores
+    predictions = predictions.view(B, A, 5 + C, H, W)
+    conf_scores_raw = predictions[:, :, 4, :, :]  # Shape (B, A, H, W)
+    offsets_raw = predictions[:, :, :4, :, :]     # Shape (B, A, 4, H, W)
+    class_scores_raw = predictions[:, :, 5:, :, :]  # Shape (B, A, C, H, W)
+    
+    # Process confidence scores with sigmoid to bring values between 0 and 1
+    conf_scores = torch.sigmoid(conf_scores_raw)  # Shape (B, A, H, W)
+    
+    # Process offsets, ensuring t^x and t^y are between -0.5 and 0.5
+    offsets = torch.clone(offsets_raw)
+    offsets[:, :, 0:2, :, :] = torch.sigmoid(offsets[:, :, 0:2, :, :]) - 0.5
+    
+    # During training, extract only the positive and negative anchors
+    if pos_anchor_idx is not None and neg_anchor_idx is not None:
+        # Extract the confidence scores for positive and negative anchors
+        pos_conf_scores = self._extract_anchor_data(conf_scores.unsqueeze(2), pos_anchor_idx)
+        neg_conf_scores = self._extract_anchor_data(conf_scores.unsqueeze(2), neg_anchor_idx)
+        conf_scores = torch.cat([pos_conf_scores, neg_conf_scores], dim=0)  # Shape (2*M, 1)
+
+        # Extract the offsets for positive anchors only
+        offsets = self._extract_anchor_data(offsets, pos_anchor_idx)  # Shape (M, 4)
+
+        # Extract the class scores for positive anchors only
+        class_scores = self._extract_class_scores(class_scores_raw, pos_anchor_idx)  # Shape (M, C)
+
+    # During inference, return outputs for all anchors
+    else:
+        class_scores = class_scores_raw.view(B, C, H, W)  # Shape (B, C, H, W)
+
+    return conf_scores, offsets, class_scores
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -310,7 +384,23 @@ class SingleStageDetector(nn.Module):
     #       (A5-1) for a better performance than with the default value.         #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    features = self.feat_extractor(images)  # Extract features (B, 1280, 7, 7)
+    
+    B, _, H, W = features.shape
+    grid = GenerateGrid(B, W, H, device=images.device)  # Generate the grid
+    anchors = GenerateAnchor(self.anchor_list.to(images.device), grid)  # Generate anchors
+    
+    iou_mat = IoU(anchors, bboxes)  # Shape (B, A*H*W, N)
+    pos_anchor_idx, neg_anchor_idx, GT_conf_scores, GT_offsets, GT_class = ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, neg_thresh=0.2)
+        
+    conf_scores, offsets, class_scores = self.pred_network(features, pos_anchor_idx=pos_anchor_idx, neg_anchor_idx=neg_anchor_idx)
+    
+    conf_loss = ConfScoreRegression(conf_scores, GT_conf_scores)
+    reg_loss = BboxRegression(offsets, GT_offsets)
+    cls_loss = ObjectClassification(class_scores, GT_class, self.num_classes)
+
+    total_loss = w_conf * conf_loss + w_reg * reg_loss + w_cls * cls_loss
+
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -346,11 +436,78 @@ class SingleStageDetector(nn.Module):
     # lists of B 2-D tensors (you may need to unsqueeze dim=1 for the last two). #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
-    ##############################################################################
-    #                               END OF YOUR CODE                             #
-    ##############################################################################
+    features = self.feat_extractor(images)  # Extract features (B, 1280, 7, 7)
+    
+    B, _, H, W = features.shape
+    grid = GenerateGrid(B, W, H, device=images.device)  # Generate the grid
+    anchors = GenerateAnchor(self.anchor_list.to(images.device), grid)  # Generate anchors
+    
+    conf_scores, offsets, class_scores = self.pred_network(features)  # Predict for all anchors
+    
+    for i in range(B):
+        # Filter out proposals with confidence score greater than the threshold
+        anchor_i = anchors[i].view(-1, 4)  # Shape (A*H*W, 4)
+        conf_i = conf_scores[i].view(-1)  # Shape (A*H*W,)
+        offsets_i = offsets[i].view(-1, 4)  # Shape (A*H*W, 4)
+        class_scores_i = class_scores[i].view(-1, self.num_classes)  # Shape (A*H*W, C)
+
+        # Apply threshold on confidence scores
+        keep_idx = conf_i > thresh
+        anchor_i = anchor_i[keep_idx]
+        conf_i = conf_i[keep_idx].unsqueeze(1)
+        offsets_i = offsets_i[keep_idx]
+        class_scores_i = class_scores_i[keep_idx]
+
+        # Apply offsets to get final proposals (manually apply the transformations)
+        proposals = self.apply_offsets_to_anchors(anchor_i, offsets_i) # Requires new method
+
+        # Apply NMS to remove overlapping boxes
+        nms_idx = torchvision.ops.nms(proposals, conf_i.squeeze(), nms_thresh)
+        final_proposals.append(proposals[nms_idx])
+        final_conf_scores.append(conf_i[nms_idx].unsqueeze(1))
+        final_class.append(class_scores_i[nms_idx].argmax(dim=1, keepdim=True))
+
     return final_proposals, final_conf_scores, final_class
+
+def apply_offsets_to_anchors(self, anchors, offsets):
+    """
+    NEW METHOD ADDITION BY CHATGPT
+    Applies the predicted offsets to the anchors to obtain the final proposals.
+
+    Inputs:
+    - anchors: Tensor of shape (M, 4) giving the coordinates of the anchors (x1, y1, x2, y2)
+    - offsets: Tensor of shape (M, 4) giving the predicted offsets (tx, ty, tw, th)
+
+    Outputs:
+    - proposals: Tensor of shape (M, 4) giving the final bounding boxes (x1, y1, x2, y2)
+    """
+    # Compute width, height, and center (cx, cy) for the anchors
+    anchor_widths = anchors[:, 2] - anchors[:, 0]
+    anchor_heights = anchors[:, 3] - anchors[:, 1]
+    anchor_cx = anchors[:, 0] + 0.5 * anchor_widths
+    anchor_cy = anchors[:, 1] + 0.5 * anchor_heights
+
+    # Extract the offsets (tx, ty, tw, th)
+    tx = offsets[:, 0]
+    ty = offsets[:, 1]
+    tw = offsets[:, 2]
+    th = offsets[:, 3]
+
+    # Apply the transformations
+    pred_cx = anchor_cx + tx * anchor_widths
+    pred_cy = anchor_cy + ty * anchor_heights
+    pred_w = anchor_widths * torch.exp(tw)
+    pred_h = anchor_heights * torch.exp(th)
+
+    # Convert center (cx, cy), width (w), height (h) to (x1, y1, x2, y2)
+    pred_x1 = pred_cx - 0.5 * pred_w
+    pred_y1 = pred_cy - 0.5 * pred_h
+    pred_x2 = pred_cx + 0.5 * pred_w
+    pred_y2 = pred_cy + 0.5 * pred_h
+
+    # Stack to form final proposals
+    proposals = torch.stack([pred_x1, pred_y1, pred_x2, pred_y2], dim=1)
+    return proposals
 
 
 def nms(boxes, scores, iou_threshold=0.5, topk=None):
@@ -386,7 +543,49 @@ def nms(boxes, scores, iou_threshold=0.5, topk=None):
   #   github.com/pytorch/vision/blob/master/torchvision/csrc/cpu/nms_cpu.cpp  #
   #############################################################################
   # Replace "pass" statement with your code
-  pass
+  device = boxes.device
+
+    # Get the coordinates of the boxes
+    x1 = boxes[:, 0]  # Top-left x-coordinate
+    y1 = boxes[:, 1]  # Top-left y-coordinate
+    x2 = boxes[:, 2]  # Bottom-right x-coordinate
+    y2 = boxes[:, 3]  # Bottom-right y-coordinate
+
+    # Compute the area of the boxes
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+
+    # Sort the scores in descending order and get their indices
+    _, order = scores.sort(0, descending=True)
+
+    keep = []  # List to store the indices of kept boxes
+
+    while order.numel() > 0:
+        # Get the index of the current highest score
+        i = order[0].item()
+        keep.append(i)
+
+        # Compute the intersection area between the current box and the remaining boxes
+        xx1 = torch.max(x1[i], x1[order[1:]])
+        yy1 = torch.max(y1[i], y1[order[1:]])
+        xx2 = torch.min(x2[i], x2[order[1:]])
+        yy2 = torch.min(y2[i], y2[order[1:]])
+
+        # Compute the width and height of the intersection area
+        w = torch.clamp(xx2 - xx1 + 1, min=0)
+        h = torch.clamp(yy2 - yy1 + 1, min=0)
+
+        # Compute the Intersection over Union (IoU)
+        intersection = w * h
+        iou = intersection / (areas[i] + areas[order[1:]] - intersection)
+
+        # Keep boxes with IoU <= iou_threshold
+        remaining = torch.where(iou <= iou_threshold)[0]
+
+        # Update the order list with remaining boxes
+        order = order[remaining + 1]  # +1 because we skipped the current highest box
+
+        if topk is not None and len(keep) >= topk:
+            break
   #############################################################################
   #                              END OF YOUR CODE                             #
   #############################################################################

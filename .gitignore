@@ -6,3 +6,6 @@ intro-to-deep-learning/assignments/Assignment0/env/**
 
 # Ignore file links
 *.lnk
+
+# Ignore other commits
+*hyungjun*
