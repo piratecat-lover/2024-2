@@ -44,8 +44,9 @@ name = namestr[8:-1]
 print(name)
 phone = phonestr[7:-1].strip('-').strip('.')
 print(phone)
-
+# name.replace(name[1], '*', 1 # 몇개까지 바꿀 건지)
 print(f"이름: {name[0]}*{name[2:]}({phone[-4:]})님 등록되었습니다.")
+# print(f"이름: {name}({phone[-4:]})님 등록되었습니다.")
 
 '''4.2.7 문제
 두 문자열의 문자를 번갈아가며 결합해 하나의 문자열로 만들려고 한다.
@@ -63,9 +64,10 @@ str3 = raw3[8:-1]
 
 def check_str(str1, str2, str3):
     check = ''
-    for i in range(min(len(str1), len(str2))):
+    j = min(len(str1), len(str2))
+    for i in range(j):
         check += str1[i] + str2[i]
-    check += str1[i+1:] + str2[i+1:]
+    check += str1[j:] + str2[j:]
     if check == str3:
         return True
     else:

@@ -38,7 +38,17 @@ def GenerateAnchor(anc, grid):
   # generate all the anchor coordinates for each image. Support batch input.   #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  B, H, W, _ = grid.shape
+  A = anc.shape[0]
+
+  anchors = torch.zeros(B, A, H, W, 4, device=grid.device, dtype=grid.dtype)
+
+  for a in range(A):
+      w_a, h_a = anc[a]
+      anchors[:, a, :, :, 0] = grid[:, :, :, 0] - w_a / 2.0  # x_tl
+      anchors[:, a, :, :, 1] = grid[:, :, :, 1] - h_a / 2.0  # y_tl
+      anchors[:, a, :, :, 2] = grid[:, :, :, 0] + w_a / 2.0  # x_br
+      anchors[:, a, :, :, 3] = grid[:, :, :, 1] + h_a / 2.0  # y_br
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -74,7 +84,19 @@ def GenerateProposal(anchors, offsets, method='YOLO'):
   # compute the proposal coordinates using the transformation formulas above.  #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  B, A, H, W, _ = anchors.shape
+  proposals = torch.zeros_like(anchors)
+
+  if method == 'YOLO':
+      tx = offsets[..., 0].sigmoid() - 0.5
+      ty = offsets[..., 1].sigmoid() - 0.5
+      tw = offsets[..., 2]
+      th = offsets[..., 3]
+
+      proposals[..., 0] = anchors[..., 0] + tx * (anchors[..., 2] - anchors[..., 0])
+      proposals[..., 1] = anchors[..., 1] + ty * (anchors[..., 3] - anchors[..., 1])
+      proposals[..., 2] = (anchors[..., 2] - anchors[..., 0]) * tw.exp() + anchors[..., 0]
+      proposals[..., 3] = (anchors[..., 3] - anchors[..., 1]) * th.exp() + anchors[..., 1]
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
