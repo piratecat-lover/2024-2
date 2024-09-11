@@ -1,3 +1,5 @@
 # Ignore data files
 intro-to-deep-learning/assignments/Assignment0/data/**
 intro-to-deep-learning/assignments/Assignment0/env/**
+*/data/**
+*/env/**
