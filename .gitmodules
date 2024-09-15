@@ -10,3 +10,6 @@
 [submodule "rirolab/FAST_LIO_SAM"]
 	path = rirolab/FAST_LIO_SAM
 	url = https://github.com/piratecat-lover/FAST_LIO_SAM
+[submodule "rirolab/osm2carla"]
+	path = rirolab/osm2carla
+	url = https://github.com/rirolab/osm2carla.git
