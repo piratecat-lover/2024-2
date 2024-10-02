@@ -1,9 +1,9 @@
 # Ignore data files
 intro-to-deep-learning/assignments/Assignment0/data/**
 intro-to-deep-learning/assignments/Assignment0/env/**
-*/data/**
-*/env/**
-
+**/data/**
+**/env/**
+**/raw-data/**
 # Ignore file links
 *.lnk
 
