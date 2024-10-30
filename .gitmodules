@@ -13,3 +13,9 @@
 [submodule "rirolab/osm2carla"]
 	path = rirolab/osm2carla
 	url = https://github.com/rirolab/osm2carla.git
+[submodule "robot-vision/project/src/COB"]
+	path = robot-vision/project/src/COB
+	url = https://github.com/kmaninis/COB.git
+[submodule "robot-vision/project/src/CASENet"]
+	path = robot-vision/project/src/CASENet
+	url = https://github.com/lijiaman/CASENet.git
