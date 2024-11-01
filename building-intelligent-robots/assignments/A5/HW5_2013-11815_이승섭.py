@@ -4,19 +4,23 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from scipy.stats import norm
 
-# Map class
+# Map class - Create 2D map with obstacles and goal.
 class Map2D:
     '''
     Generates a 2D map of specified size, goal position, initial robot position and obstacles for localization.
     '''
-    def __init__(self, space_size, goal_pos, num_obstacles):
+    def __init__(self, space_size, goal_pos, num_obstacles, GT_pos = None):
         '''
         Initialize with size and number of obstacles.
         '''
         self.space_size = space_size
         self.goal_pos = goal_pos
-        self.GT_pos = np.random.uniform(0, space_size[0], 2)
         self.obstacles = self.gen_obstacles(num_obstacles)
+        if GT_pos is not None:
+            self.__GT_pos = GT_pos
+        else:
+            self.__GT_pos = np.random.uniform(0, space_size[0], 2).astype(float)
+        
 
     def gen_obstacles(self, num_obstacles):
         '''
@@ -29,7 +33,7 @@ class Map2D:
         '''
         Returns the true position of the robot.
         '''
-        return self.GT_pos
+        return self.__GT_pos
     
     def get_goal(self):
         '''
@@ -41,8 +45,8 @@ class Map2D:
         '''
         Updates the true position of the robot with given motion.
         '''
-        self.GT_pos += motion + np.random.normal(0, noise, self.GT_pos.shape)
-        self.GT_pos = np.clip(self.GT_pos, 0, self.space_size[0] - 1)
+        self.__GT_pos += motion + np.random.normal(0, noise, self.__GT_pos.shape)
+        self.__GT_pos = np.clip(self.__GT_pos, 0, self.space_size[0] - 1)
 
 
 # ParticleFilter class
@@ -130,12 +134,13 @@ class Robot:
         self.pf = pf
         self.var_threshold = var_threshold
         self.trajectory = [self.map2D.get_GT()]
+        self.est_pos = self.pf.estimate_pos()  # Initialize with initial particle filter estimate
 
     def avoid_obstacles(self, motion):
         for obstacle in self.map2D.obstacles:
-            dist_to_obstacle = np.linalg.norm(self.map2D.get_GT() - obstacle)
+            dist_to_obstacle = np.linalg.norm(self.est_pos - obstacle)  # Use est_pos instead of GT
             if dist_to_obstacle < 4.0:
-                obstacle_dir = self.map2D.get_GT() - obstacle
+                obstacle_dir = self.est_pos - obstacle
                 obstacle_dir /= np.linalg.norm(obstacle_dir)
                 motion += 0.2 * obstacle_dir
         return motion / np.linalg.norm(motion)
@@ -144,19 +149,23 @@ class Robot:
         if not self.pf.check_pos_var(var_threshold=self.var_threshold):
             motion = np.random.uniform(-1, 1, 2)
         else:
-            direction = self.map2D.get_goal() - self.map2D.get_GT()
+            direction = self.map2D.get_goal() - self.est_pos  # Move towards goal based on est_pos
             motion = 0.5 * direction / np.linalg.norm(direction)
             motion = self.avoid_obstacles(motion)
 
+        # Update true position and add to trajectory
         self.map2D.update_GT(motion)
         self.trajectory.append(self.map2D.get_GT())
-        self.pf.move(motion)
 
+        # Move particles and update particle filter
+        self.pf.move(motion)
         true_sensor_dists = self.pf.measure_dist(self.map2D.get_GT())
         self.pf.update_weights(true_sensor_dists)
         self.pf.resample()
 
-        return self.pf.estimate_pos()
+        # Update est_pos with the latest particle filter estimate
+        self.est_pos = self.pf.estimate_pos()
+        return self.est_pos
 
 
 # ShowMap Class for visualization
@@ -194,7 +203,7 @@ class ShowMap:
 
     def animate(self):
         fig = plt.figure()
-        self.ani = FuncAnimation(fig, self.update, frames=range(100), repeat=False)
+        self.ani = FuncAnimation(fig, self.update, frames=range(1000), repeat=False, interval = 1000)
         plt.show()
 
 
@@ -206,8 +215,8 @@ if __name__ == '__main__':
     num_obstacles = 100
     num_particles = 150
     sensor_noise = 1
-    motion_noise = 0.5
-    var_threshold = 1.5
+    motion_noise = 1
+    var_threshold = 1.0
 
     # Initialize classes
     map2D = Map2D(space_size, goal_pos, num_obstacles)
